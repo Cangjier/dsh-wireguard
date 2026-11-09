@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WireGuard 组网",
+    "description": "安装 WireGuard、启动服务端或加入现有服务端，让 Windows 与 Linux 设备通过私有 VPN 地址互相访问。"
+  }
+}

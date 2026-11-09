@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WireGuard mesh",
+    "description": "Install WireGuard, run a server or join one, and let Windows and Linux devices reach each other over private VPN addresses."
+  }
+}

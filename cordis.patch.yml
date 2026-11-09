@@ -1,0 +1,12 @@
+- insert:
+    - id: dsh-wireguard
+      name: '@local/dsh-wireguard'
+      config:
+        controlPort: 51821
+        listenPort: 51820
+        vpnCidr: 10.66.66.0/24
+        serverIp: 10.66.66.1
+        mtu: 1420
+        interfaceName: dshwg0
+        endpointHost: ''
+        joinCode: ''
