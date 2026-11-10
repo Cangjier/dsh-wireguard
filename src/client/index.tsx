@@ -55,7 +55,7 @@ import {
   type Settings,
   type Snapshot,
 } from './api';
-import { buildLinuxClientCommand, buildLinuxClientSimpleCommand, LINUX_CLIENT_RESTART_COMMAND } from './deploy';
+import { buildLinuxClientCommand, buildLinuxClientSimpleCommand, buildWindowsClientCommand, LINUX_CLIENT_RESTART_COMMAND } from './deploy';
 import { dictionary, EN, interpolate, type MessageKey } from './i18n';
 
 const NS = 'dsh-wireguard';
@@ -522,6 +522,7 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
     ipv6: { available: false, controlUrl: null, endpoint: null },
   };
   const [family, setFamily] = useState<'ipv4' | 'ipv6'>(() => deployment.ipv4.available ? 'ipv4' : 'ipv6');
+  const [system, setSystem] = useState<'linux' | 'windows'>('linux');
   const [mode, setMode] = useState<'simple' | 'full'>('full');
   const target = deployment[family];
   useEffect(() => {
@@ -531,7 +532,8 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
   }, [target.available, deployment.ipv4.available, deployment.ipv6.available]);
   const simple = useMemo(() => buildLinuxClientSimpleCommand(state, target), [state, target]);
   const full = useMemo(() => buildLinuxClientCommand(state, target), [state, target]);
-  const command = mode === 'full' ? full : simple;
+  const windows = useMemo(() => buildWindowsClientCommand(state, target), [state, target]);
+  const command = system === 'windows' ? windows : mode === 'full' ? full : simple;
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     if (await copyToClipboard(command)) {
@@ -543,49 +545,66 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
     <Card
       className="dsh-wg-card"
       title={<Space><LaptopOutlined /><span>{t('service.deployTitle')}</span></Space>}
-      extra={<Tag>Linux</Tag>}
+      extra={<Tag>{system === 'windows' ? 'Windows' : 'Linux'}</Tag>}
     >
       <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
         {t('service.deploySubtitle')}
       </Typography.Paragraph>
       <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployWarning')} />
-      <Space wrap size={10} style={{ marginBottom: 12 }}>
-        <Space size={4}>
-          <Typography.Text type="secondary">{t('service.deployFamily')}</Typography.Text>
-          <Select
-            size="small"
-            value={family}
-            style={{ width: 110 }}
-            onChange={(value) => setFamily(value as 'ipv4' | 'ipv6')}
-            options={[
-              { label: 'IPv4', value: 'ipv4', disabled: !deployment.ipv4.available },
-              { label: 'IPv6', value: 'ipv6', disabled: !deployment.ipv6.available },
-            ]}
-          />
+      <div style={{ marginBottom: 12 }}>
+        <Space wrap size={10}>
+          <Space size={4}>
+            <Typography.Text type="secondary">{t('service.deploySystem')}</Typography.Text>
+            <Select
+              size="small"
+              value={system}
+              style={{ width: 120 }}
+              onChange={(value) => setSystem(value as 'linux' | 'windows')}
+              options={[
+                { label: 'Linux', value: 'linux' },
+                { label: 'Windows', value: 'windows' },
+              ]}
+            />
+          </Space>
+          <Space size={4}>
+            <Typography.Text type="secondary">{t('service.deployFamily')}</Typography.Text>
+            <Select
+              size="small"
+              value={family}
+              style={{ width: 110 }}
+              onChange={(value) => setFamily(value as 'ipv4' | 'ipv6')}
+              options={[
+                { label: 'IPv4', value: 'ipv4', disabled: !deployment.ipv4.available },
+                { label: 'IPv6', value: 'ipv6', disabled: !deployment.ipv6.available },
+              ]}
+            />
+          </Space>
+          {system === 'linux' ? (
+            <Space size={4}>
+              <Typography.Text type="secondary">{t('service.deployMode')}</Typography.Text>
+              <Select
+                size="small"
+                value={mode}
+                style={{ width: 180 }}
+                onChange={(value) => setMode(value as 'simple' | 'full')}
+                options={[
+                  { label: t('service.deployFullTitle'), value: 'full' },
+                  { label: t('service.deploySimpleTitle'), value: 'simple' },
+                ]}
+              />
+            </Space>
+          ) : null}
         </Space>
-        <Space size={4}>
-          <Typography.Text type="secondary">{t('service.deployMode')}</Typography.Text>
-          <Select
-            size="small"
-            value={mode}
-            style={{ width: 180 }}
-            onChange={(value) => setMode(value as 'simple' | 'full')}
-            options={[
-              { label: t('service.deployFullTitle'), value: 'full' },
-              { label: t('service.deploySimpleTitle'), value: 'simple' },
-            ]}
-          />
-        </Space>
-      </Space>
+      </div>
       {!target.available ? (
         <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployUnavailable')} />
       ) : null}
-      <Space wrap align="center" size={12}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginTop: 12 }}>
         <Typography.Text style={{ fontSize: 12 }}>{t('service.deployEffect')}</Typography.Text>
         <Button type="primary" icon={<CopyOutlined />} disabled={!target.available} onClick={() => void copy()}>
           {copied ? t('service.deployCopied') : t('service.deployCopy')}
         </Button>
-      </Space>
+      </div>
     </Card>
   );
 }

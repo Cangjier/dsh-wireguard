@@ -50,6 +50,43 @@ export function buildLinuxClientCommand(state: Snapshot, target?: DeploymentTarg
 }
 
 /**
+ * Windows client command. The PowerShell body joins the server, writes a
+ * WireGuard tunnel config, and installs it as a Windows service. It is encoded
+ * as UTF-16LE because that is what `powershell -EncodedCommand` expects.
+ * @param {Snapshot} state running server snapshot.
+ * @param {DeploymentTarget} [target] selected IPv4 or IPv6 target.
+ * @returns {string} one-line PowerShell command.
+ */
+export function buildWindowsClientCommand(state: Snapshot, target?: DeploymentTarget): string {
+  const { controlUrl, joinCode, family } = targetOf(state, target);
+  const quote = (value: string) => value.replace(/'/g, "''");
+  const script = `$ErrorActionPreference = 'Stop'
+$control = '${quote(controlUrl)}'
+$code = '${quote(joinCode)}'
+$family = '${quote(family)}'
+$wg = Join-Path $env:ProgramFiles 'WireGuard\\wg.exe'
+if (-not (Test-Path $wg)) { throw 'Install WireGuard for Windows first: https://www.wireguard.com/install/' }
+$key = (& $wg genkey).Trim()
+$pub = ($key | & $wg pubkey).Trim()
+$payload = @{ name = $env:COMPUTERNAME; publicKey = $pub; code = $code; family = $family } | ConvertTo-Json -Compress
+$join = Invoke-RestMethod -Method Post -Uri "$control/join" -ContentType 'application/json' -Body $payload
+if (-not $join.ok) { throw 'Join failed' }
+$conf = Join-Path $env:ProgramData 'WireGuard\\dshwg0.conf'
+New-Item -ItemType Directory -Force (Split-Path $conf) | Out-Null
+$lines = @('[Interface]', "PrivateKey = $key", "Address = $($join.client.address)", "MTU = $($join.server.mtu)")
+if ($join.server.dns) { $lines += "DNS = $($join.server.dns)" }
+$lines += '', '[Peer]', "PublicKey = $($join.server.publicKey)", "Endpoint = $($join.server.endpoint)", "AllowedIPs = $($join.server.vpnCidr)", 'PersistentKeepalive = 25'
+Set-Content -Path $conf -Value $lines -Encoding ascii
+& (Join-Path $env:ProgramFiles 'WireGuard\\wireguard.exe') /installtunnelservice $conf`;
+  let binary = '';
+  for (let index = 0; index < script.length; index += 1) {
+    const code = script.charCodeAt(index);
+    binary += String.fromCharCode(code & 0xff, code >>> 8);
+  }
+  return `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${btoa(binary)}`;
+}
+
+/**
  * Command to run on the client to bring its tunnel down and up again. This
  * triggers a fresh WireGuard handshake without rejoining or changing keys.
  */
