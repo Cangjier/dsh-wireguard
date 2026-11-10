@@ -550,26 +550,32 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
       </Typography.Paragraph>
       <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployWarning')} />
       <Space wrap size={10} style={{ marginBottom: 12 }}>
-        <Select
-          size="small"
-          value={family}
-          style={{ width: 150 }}
-          onChange={(value) => setFamily(value as 'ipv4' | 'ipv6')}
-          options={[
-            { label: `IPv4 · ${t('service.deployFamily')}`, value: 'ipv4', disabled: !deployment.ipv4.available },
-            { label: 'IPv6', value: 'ipv6', disabled: !deployment.ipv6.available },
-          ]}
-        />
-        <Select
-          size="small"
-          value={mode}
-          style={{ width: 180 }}
-          onChange={(value) => setMode(value as 'simple' | 'full')}
-          options={[
-            { label: t('service.deployFullTitle'), value: 'full' },
-            { label: t('service.deploySimpleTitle'), value: 'simple' },
-          ]}
-        />
+        <Space size={4}>
+          <Typography.Text type="secondary">{t('service.deployFamily')}</Typography.Text>
+          <Select
+            size="small"
+            value={family}
+            style={{ width: 110 }}
+            onChange={(value) => setFamily(value as 'ipv4' | 'ipv6')}
+            options={[
+              { label: 'IPv4', value: 'ipv4', disabled: !deployment.ipv4.available },
+              { label: 'IPv6', value: 'ipv6', disabled: !deployment.ipv6.available },
+            ]}
+          />
+        </Space>
+        <Space size={4}>
+          <Typography.Text type="secondary">{t('service.deployMode')}</Typography.Text>
+          <Select
+            size="small"
+            value={mode}
+            style={{ width: 180 }}
+            onChange={(value) => setMode(value as 'simple' | 'full')}
+            options={[
+              { label: t('service.deployFullTitle'), value: 'full' },
+              { label: t('service.deploySimpleTitle'), value: 'simple' },
+            ]}
+          />
+        </Space>
       </Space>
       {!target.available ? (
         <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployUnavailable')} />
