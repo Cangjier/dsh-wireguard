@@ -114,6 +114,65 @@ the IPv6 target is disabled; use a dual-stack relay or NAT64 in front of the
 server. If **Advertised address** is itself an IPv6 literal, only the IPv6 target
 is available; use an IPv4 address or a dual-stack DNS name to keep IPv4 clients.
 
+## Standalone control panel service
+
+For a server member, the control panel can run outside DSH and keep 51821 alive
+when DSH exits. Build `control-service.js` with `node scripts/build.mjs`, then:
+
+Windows (administrator PowerShell):
+
+```powershell
+.\code\windows-service\install-control-service.ps1 -Root . -DshHome C:\Users\you\.dsh
+```
+
+This creates the `DSH-WireGuard-Control` service, Automatic, LocalSystem. It
+starts `node control-service.js`, which owns 51821 and serves both the join API
+and `/api/dsh-wireguard/*`.
+
+Linux:
+
+```bash
+sudo ./install-control-service.sh --dsh-home /root/.dsh --node /usr/bin/node
+# unit: dsh-wireguard-control.service
+```
+
+On the server member, set the DSH plugin row to:
+
+```yaml
+- id: dsh-wireguard
+  config:
+    externalControlPanel: true
+```
+
+Then the plugin does not bind 51821 itself; its built-in panel API proxies to
+the standalone service. Stopping or restarting DSH no longer stops 51821.
+Client members should leave `externalControlPanel` false and do not need the
+control service.
+
+## Harness exit and the tunnel
+
+The tunnel is OS-level state, not a child of Harness:
+
+- Windows: `wireguard.exe /installtunnelservice` creates the
+  `WireGuardTunnel$<interface>` service, which is independent of Harness.
+- Linux: the interface is created with `ip link` and lives in the kernel.
+
+By default (`keepTunnelOnExit: true`) stopping or restarting Harness stops the
+control panel but **keeps** the tunnel and the saved connected/running state.
+The next Harness start adopts the live interface in `init()`/`#reconcile()`, so
+a restart does not remove this machine from the mesh. Set
+`keepTunnelOnExit: false` to restore the old behavior (dispose tears the tunnel
+down).
+
+Two consequences:
+
+- While Harness is down, the **control panel** is down too (it is an HTTP
+  listener inside the plugin), so new clients cannot join and `/peers` is
+  unavailable; existing tunnels keep forwarding.
+- A Linux reboot still loses an interface that was created only with `ip link`.
+  Enable `wg-quick@<interface>` (the client bootstrap script does this) if it
+  must come back at boot without Harness.
+
 ## Troubleshooting
 
 ### A joined peer stays offline

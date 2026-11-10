@@ -50,6 +50,7 @@ export class WireGuardService {
   readonly now: () => number;
   readonly logger: (line: string) => void;
   control: ControlPanel | null;
+  controlExtraHandler: ((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null;
   platform: PlatformInfo | null;
   tunnel: any;
   platformAt: number;
@@ -65,6 +66,7 @@ export class WireGuardService {
     this.now = options.now ?? (() => Date.now());
     this.logger = options.log ?? ((line) => console.log(`[dsh-wireguard] ${line}`));
     this.control = null;
+    this.controlExtraHandler = null;
     this.platform = null;
     this.tunnel = null;
     this.platformAt = 0;
@@ -212,7 +214,11 @@ export class WireGuardService {
    * Start the LAN control panel for the running server.
    * @returns {Promise<void>}
    */
-  async #startControl() {
+  async #startControl(force = false) {
+    if (!force && this.config.externalControlPanel === true) {
+      this.#log('control panel is owned by an external service');
+      return;
+    }
     if (this.control) await this.control.stop();
     const panel = new ControlPanel({
       getServerInfo: () => this.#controlInfo(),
@@ -220,10 +226,34 @@ export class WireGuardService {
       getAccessCode: () => this.state.settings.joinCode,
       onJoin: (body, remoteAddress) => this.joinPeer(body, remoteAddress),
       onLeave: (body, remoteAddress) => this.leavePeer(body, remoteAddress),
+      extraHandler: this.controlExtraHandler,
       log: (line) => this.#log(line),
     });
     await panel.start(this.state.server.controlPort, '::');
     this.control = panel;
+  }
+
+  /**
+   * Install an additional HTTP handler on the control-panel listener. The
+   * standalone control service uses this to serve the same panel API that the
+   * DSH host API normally serves.
+   * @param {((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null} handler handler.
+   * @returns {void}
+   */
+  setControlExtraHandler(handler: ((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null) {
+    this.controlExtraHandler = handler;
+  }
+
+  /**
+   * Start the control panel explicitly, even when `externalControlPanel` is
+   * true. Used by the standalone control service, not by the DSH plugin.
+   * @returns {Promise<Record<string, unknown>>} state snapshot.
+   */
+  async startControlPanel() {
+    return this.#serialized(async () => {
+      await this.#startControl(true);
+      return this.snapshot();
+    });
   }
 
   /**
@@ -513,7 +543,7 @@ export class WireGuardService {
   async stopServer() {
     return this.#serialized(async () => {
       if (!this.state.server.running && !this.control) return this.snapshot();
-      if (this.control) {
+      if (this.control && this.config.externalControlPanel !== true) {
         await this.control.stop();
         this.control = null;
       }
@@ -1257,7 +1287,7 @@ export class WireGuardService {
     }
   }
 
-  /** Stop the control panel and any tunnel this plugin instance owns. */
+  /** Stop the control panel; keep or tear down the tunnel according to config. */
   async dispose() {
     try {
       if (this.control) await this.control.stop();
@@ -1265,6 +1295,14 @@ export class WireGuardService {
       // Shutdown is best effort.
     }
     this.control = null;
+    // A mesh should not lose a peer because Harness was restarted. By default
+    // the interface/tunnel service is OS-level state: keep it, keep the state
+    // file saying it is connected, and let the next init() adopt it through
+    // #reconcile(). Set keepTunnelOnExit: false to restore the old teardown.
+    if (this.config.keepTunnelOnExit !== false) {
+      this.#log('keeping the WireGuard tunnel alive across Harness exit');
+      return;
+    }
     if (this.tunnel) {
       if (this.state.server.running) {
         try {

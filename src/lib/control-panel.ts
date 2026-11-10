@@ -101,6 +101,7 @@ export interface ControlPanelOptions {
   getAccessCode: () => string;
   onJoin: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
   onLeave: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
+  extraHandler?: (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean;
   log?: (message: string) => void;
 }
 
@@ -187,6 +188,11 @@ export class ControlPanel {
     if (!this.allow(remoteAddress)) {
       writeJson(response, 429, { ok: false, error: { code: 'rate_limited', message: 'Too many requests. Try again in a minute.' } });
       return;
+    }
+
+    if (this.options.extraHandler) {
+      const handled = await this.options.extraHandler(request, response);
+      if (handled) return;
     }
 
     if (method === 'POST' && url.pathname === '/login') {

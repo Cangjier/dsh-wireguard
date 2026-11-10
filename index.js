@@ -2,6 +2,9 @@
 import { homedir } from "node:os";
 import path5 from "node:path";
 
+// src/lib/http-api.ts
+import { request as httpRequest } from "node:http";
+
 // src/lib/constants.ts
 var PLUGIN_VERSION = "0.2.0";
 var SERVICE_NAME = "dsh-wireguard";
@@ -83,67 +86,102 @@ async function readJson(request) {
   }
   return parsed;
 }
+function createHttpApiHandler(service) {
+  return async (request, response) => {
+    try {
+      const method = request.method ?? "GET";
+      const url = new URL(request.url ?? "/", "http://local.invalid");
+      const path6 = url.pathname;
+      if (method === "GET" && path6 === `${API_PREFIX}/state`) {
+        writeJson(response, 200, { ok: true, state: await service.getState() });
+        return;
+      }
+      if (method === "GET" && path6 === `${API_PREFIX}/health`) {
+        writeJson(response, 200, { ok: true, service: "dsh-wireguard" });
+        return;
+      }
+      if (method !== "POST") {
+        writeJson(response, 405, { ok: false, error: { code: "method_not_allowed", message: "Use GET or POST." } });
+        return;
+      }
+      if (request.headers[AGENT_HEADER] !== "1") {
+        writeJson(response, 403, { ok: false, error: { code: "forbidden", message: "Missing the local WireGuard request header." } });
+        return;
+      }
+      const body = await readJson(request);
+      let result;
+      if (path6 === `${API_PREFIX}/install`) result = await service.installWireGuard();
+      else if (path6 === `${API_PREFIX}/server/start`) result = await service.startServer(body);
+      else if (path6 === `${API_PREFIX}/server/stop`) result = await service.stopServer();
+      else if (path6 === `${API_PREFIX}/peers/remove`) result = await service.removePeer(String(body.publicKey ?? ""));
+      else if (path6 === `${API_PREFIX}/peers/ssh`) result = await service.configurePeerSsh(body);
+      else if (path6 === `${API_PREFIX}/client/connect`) result = await service.connectClient(body);
+      else if (path6 === `${API_PREFIX}/client/retry`) result = await service.retryClient();
+      else if (path6 === `${API_PREFIX}/client/disconnect`) result = await service.disconnectClient();
+      else if (path6 === `${API_PREFIX}/refresh`) result = await service.getState({ force: true });
+      else {
+        writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown WireGuard endpoint." } });
+        return;
+      }
+      if (result && typeof result === "object" && Object.prototype.hasOwnProperty.call(result, "state")) {
+        writeJson(response, 200, { ok: true, ...result });
+      } else {
+        writeJson(response, 200, { ok: true, state: result });
+      }
+    } catch (error) {
+      const state = service.snapshot();
+      if (error instanceof WireGuardError) {
+        writeJson(response, error.status, { ok: false, error: error.toJSON(), state });
+        return;
+      }
+      writeJson(response, 500, {
+        ok: false,
+        error: {
+          code: "internal_error",
+          message: error instanceof Error ? error.message : "The WireGuard operation failed."
+        },
+        state
+      });
+    }
+  };
+}
+function createExternalControlProxy(service) {
+  return async (request, response) => {
+    const port = service.state.server.controlPort || service.state.settings.controlPort;
+    await new Promise((resolve) => {
+      const upstream = httpRequest({
+        host: "127.0.0.1",
+        port,
+        method: request.method,
+        path: request.url,
+        headers: { ...request.headers, host: `127.0.0.1:${port}` }
+      }, (answer) => {
+        response.writeHead(answer.statusCode ?? 502, answer.headers);
+        answer.pipe(response);
+        answer.once("end", resolve);
+      });
+      upstream.once("error", () => {
+        if (!response.headersSent) {
+          writeJson(response, 503, {
+            ok: false,
+            error: {
+              code: "control_panel_unavailable",
+              message: "The standalone WireGuard control service is not reachable on 51821."
+            }
+          });
+        }
+        resolve();
+      });
+      request.pipe(upstream);
+    });
+  };
+}
 function registerHttpApi(ctx, service) {
+  const handler = service.config.externalControlPanel === true ? createExternalControlProxy(service) : createHttpApiHandler(service);
   ctx.effect(() => ctx.webServer.register({
     kind: "prefix",
     path: API_PREFIX,
-    handler: async (request, response) => {
-      try {
-        const method = request.method ?? "GET";
-        const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path6 = url.pathname;
-        if (method === "GET" && path6 === `${API_PREFIX}/state`) {
-          writeJson(response, 200, { ok: true, state: await service.getState() });
-          return;
-        }
-        if (method === "GET" && path6 === `${API_PREFIX}/health`) {
-          writeJson(response, 200, { ok: true, service: "dsh-wireguard" });
-          return;
-        }
-        if (method !== "POST") {
-          writeJson(response, 405, { ok: false, error: { code: "method_not_allowed", message: "Use GET or POST." } });
-          return;
-        }
-        if (request.headers[AGENT_HEADER] !== "1") {
-          writeJson(response, 403, { ok: false, error: { code: "forbidden", message: "Missing the local WireGuard request header." } });
-          return;
-        }
-        const body = await readJson(request);
-        let result;
-        if (path6 === `${API_PREFIX}/install`) result = await service.installWireGuard();
-        else if (path6 === `${API_PREFIX}/server/start`) result = await service.startServer(body);
-        else if (path6 === `${API_PREFIX}/server/stop`) result = await service.stopServer();
-        else if (path6 === `${API_PREFIX}/peers/remove`) result = await service.removePeer(String(body.publicKey ?? ""));
-        else if (path6 === `${API_PREFIX}/peers/ssh`) result = await service.configurePeerSsh(body);
-        else if (path6 === `${API_PREFIX}/client/connect`) result = await service.connectClient(body);
-        else if (path6 === `${API_PREFIX}/client/retry`) result = await service.retryClient();
-        else if (path6 === `${API_PREFIX}/client/disconnect`) result = await service.disconnectClient();
-        else if (path6 === `${API_PREFIX}/refresh`) result = await service.getState({ force: true });
-        else {
-          writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown WireGuard endpoint." } });
-          return;
-        }
-        if (result && typeof result === "object" && Object.prototype.hasOwnProperty.call(result, "state")) {
-          writeJson(response, 200, { ok: true, ...result });
-        } else {
-          writeJson(response, 200, { ok: true, state: result });
-        }
-      } catch (error) {
-        const state = service.snapshot();
-        if (error instanceof WireGuardError) {
-          writeJson(response, error.status, { ok: false, error: error.toJSON(), state });
-          return;
-        }
-        writeJson(response, 500, {
-          ok: false,
-          error: {
-            code: "internal_error",
-            message: error instanceof Error ? error.message : "The WireGuard operation failed."
-          },
-          state
-        });
-      }
-    }
+    handler
   }), "wireguard local api");
 }
 
@@ -743,6 +781,10 @@ var ControlPanel = class {
     if (!this.allow(remoteAddress)) {
       writeJson2(response, 429, { ok: false, error: { code: "rate_limited", message: "Too many requests. Try again in a minute." } });
       return;
+    }
+    if (this.options.extraHandler) {
+      const handled = await this.options.extraHandler(request, response);
+      if (handled) return;
     }
     if (method === "POST" && url.pathname === "/login") {
       await this.handleLogin(request, response);
@@ -2080,6 +2122,7 @@ var WireGuardService = class {
   now;
   logger;
   control;
+  controlExtraHandler;
   platform;
   tunnel;
   platformAt;
@@ -2094,6 +2137,7 @@ var WireGuardService = class {
     this.now = options.now ?? (() => Date.now());
     this.logger = options.log ?? ((line) => console.log(`[dsh-wireguard] ${line}`));
     this.control = null;
+    this.controlExtraHandler = null;
     this.platform = null;
     this.tunnel = null;
     this.platformAt = 0;
@@ -2230,7 +2274,11 @@ var WireGuardService = class {
    * Start the LAN control panel for the running server.
    * @returns {Promise<void>}
    */
-  async #startControl() {
+  async #startControl(force = false) {
+    if (!force && this.config.externalControlPanel === true) {
+      this.#log("control panel is owned by an external service");
+      return;
+    }
     if (this.control) await this.control.stop();
     const panel = new ControlPanel({
       getServerInfo: () => this.#controlInfo(),
@@ -2238,10 +2286,32 @@ var WireGuardService = class {
       getAccessCode: () => this.state.settings.joinCode,
       onJoin: (body, remoteAddress) => this.joinPeer(body, remoteAddress),
       onLeave: (body, remoteAddress) => this.leavePeer(body, remoteAddress),
+      extraHandler: this.controlExtraHandler,
       log: (line) => this.#log(line)
     });
     await panel.start(this.state.server.controlPort, "::");
     this.control = panel;
+  }
+  /**
+   * Install an additional HTTP handler on the control-panel listener. The
+   * standalone control service uses this to serve the same panel API that the
+   * DSH host API normally serves.
+   * @param {((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null} handler handler.
+   * @returns {void}
+   */
+  setControlExtraHandler(handler) {
+    this.controlExtraHandler = handler;
+  }
+  /**
+   * Start the control panel explicitly, even when `externalControlPanel` is
+   * true. Used by the standalone control service, not by the DSH plugin.
+   * @returns {Promise<Record<string, unknown>>} state snapshot.
+   */
+  async startControlPanel() {
+    return this.#serialized(async () => {
+      await this.#startControl(true);
+      return this.snapshot();
+    });
   }
   /**
    * Rewrite the persisted server config after a peer change so a WireGuard
@@ -2520,7 +2590,7 @@ var WireGuardService = class {
   async stopServer() {
     return this.#serialized(async () => {
       if (!this.state.server.running && !this.control) return this.snapshot();
-      if (this.control) {
+      if (this.control && this.config.externalControlPanel !== true) {
         await this.control.stop();
         this.control = null;
       }
@@ -3241,13 +3311,17 @@ var WireGuardService = class {
       clearTimeout(timer);
     }
   }
-  /** Stop the control panel and any tunnel this plugin instance owns. */
+  /** Stop the control panel; keep or tear down the tunnel according to config. */
   async dispose() {
     try {
       if (this.control) await this.control.stop();
     } catch {
     }
     this.control = null;
+    if (this.config.keepTunnelOnExit !== false) {
+      this.#log("keeping the WireGuard tunnel alive across Harness exit");
+      return;
+    }
     if (this.tunnel) {
       if (this.state.server.running) {
         try {

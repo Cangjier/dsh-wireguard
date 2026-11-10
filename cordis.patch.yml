@@ -10,3 +10,6 @@
         interfaceName: dshwg0
         endpointHost: ''
         joinCode: ''
+        # Keep the OS tunnel alive when Harness exits, so a restart does not
+        # drop this peer out of the mesh. Set false for old teardown behavior.
+        keepTunnelOnExit: true

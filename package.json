@@ -12,7 +12,12 @@
   },
   "files": [
     "index.js",
+    "control-service.js",
     "client.js",
+    "start-control.sh",
+    "install-control-service.sh",
+    "uninstall-control-service.sh",
+    "code",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

@@ -5,10 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-async function buildHost() {
+async function buildNode(entry, outfile) {
   const result = await build({
-    entryPoints: [path.join(root, 'src/index.ts')],
-    outfile: path.join(root, 'index.js'),
+    entryPoints: [path.join(root, entry)],
+    write: false,
     bundle: true,
     platform: 'node',
     format: 'esm',
@@ -18,7 +18,14 @@ async function buildHost() {
     legalComments: 'none',
     logLevel: 'info',
   });
-  if (result.errors.length > 0) throw new Error('Host build failed');
+  const code = result.outputFiles?.[0]?.text;
+  if (!code) throw new Error(`Build produced no output for ${entry}`);
+  await writeFile(path.join(root, outfile), code, 'utf8');
+}
+
+async function buildHost() {
+  await buildNode('src/index.ts', 'index.js');
+  await buildNode('src/control-service.ts', 'control-service.js');
 }
 
 async function buildClient() {
