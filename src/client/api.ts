@@ -176,7 +176,7 @@ export const api = {
   // body must be an object even for actions that carry no arguments.
   stopServer: () => request('/server/stop', {}),
   removePeer: (publicKey: string) => request('/peers/remove', { publicKey }),
-  configureSsh: (publicKey: string, user: string) => requestPayload<{ state: Snapshot; command: string }>('/peers/ssh', { publicKey, user }),
+  configureSsh: (publicKey: string, user: string) => requestPayload<{ state: Snapshot; command: string; commands: { linux: string; windows: string }; publicKey: string }>('/peers/ssh', { publicKey, user }),
   connectClient: (values: { serverAddress: string; joinCode: string; name?: string }) => request('/client/connect', values),
   retryClient: () => request('/client/retry', {}),
   disconnectClient: () => request('/client/disconnect', {}),

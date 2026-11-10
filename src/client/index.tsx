@@ -185,7 +185,7 @@ function useController(ctx: any) {
         setState(result.state);
         setError(null);
       }
-      return result.command;
+      return result.commands;
     } catch (failure) {
       if (alive.current) {
         setError(failure instanceof ApiError ? failure : new ApiError({ code: 'unknown', message: String(failure) }, 0));
@@ -644,12 +644,14 @@ function RunningService({
   onStop: () => void;
   onRemove: (publicKey: string) => void;
   onOpenControl: () => void;
-  onConfigureSsh: (publicKey: string, user: string) => Promise<string | undefined>;
+  onConfigureSsh: (publicKey: string, user: string) => Promise<{ linux: string; windows: string } | undefined>;
 }) {
   const server: ServerState = state.server;
   const controlUrl = server.controlUrl || '';
   const [sshPeer, setSshPeer] = useState<Peer | null>(null);
   const [sshUser, setSshUser] = useState('root');
+  const [sshPlatform, setSshPlatform] = useState<'linux' | 'windows'>('linux');
+  const [sshCommands, setSshCommands] = useState<{ linux: string; windows: string } | null>(null);
   const [sshError, setSshError] = useState('');
   const [sshCopied, setSshCopied] = useState(false);
   const columns: ColumnsType<Peer> = [
@@ -703,6 +705,8 @@ function RunningService({
             onClick={() => {
               setSshPeer(peer);
               setSshUser(peer.sshUser || 'root');
+              setSshPlatform('linux');
+              setSshCommands(null);
               setSshError('');
               setSshCopied(false);
             }}
@@ -844,15 +848,40 @@ function RunningService({
           value={sshUser}
           onChange={(event) => {
             setSshUser(event.target.value);
+            setSshCommands(null);
             setSshError('');
             setSshCopied(false);
           }}
           placeholder="root"
           style={{ marginTop: 6 }}
         />
+        <Tabs
+          size="small"
+          activeKey={sshPlatform}
+          onChange={(key) => {
+            const platform = key as 'linux' | 'windows';
+            setSshPlatform(platform);
+            setSshCommands(null);
+            setSshCopied(false);
+            if (platform === 'windows' && sshUser === 'root') setSshUser('Administrator');
+            if (platform === 'linux' && sshUser === 'Administrator') setSshUser('root');
+          }}
+          items={[
+            { key: 'linux', label: t('service.sshLinux') },
+            { key: 'windows', label: t('service.sshWindows') },
+          ]}
+          style={{ marginTop: 10 }}
+        />
+        {sshPlatform === 'windows' ? (
+          <Alert type="info" showIcon style={{ marginBottom: 10 }} message={t('service.sshWindowsHelp')} />
+        ) : null}
         {sshError ? <Alert type="error" showIcon style={{ marginTop: 12 }} message={sshError} /> : null}
         <Alert type="info" showIcon style={{ marginTop: 12 }} message={t('service.sshPrivateNote')} />
-        <Alert type="warning" showIcon style={{ marginTop: 12 }} message={t('service.sshWindowsNote')} />
+        {sshCommands !== null ? (
+          <pre className="dsh-wg-command" style={{ marginTop: 12, maxHeight: 150, overflow: 'auto' }}>
+            {sshCommands[sshPlatform]}
+          </pre>
+        ) : null}
         {sshCopied ? <Alert type="success" showIcon style={{ marginTop: 12 }} message={t('service.sshCopied')} /> : null}
         <Button
           type="primary"
@@ -867,16 +896,20 @@ function RunningService({
               setSshError(t('service.sshInvalidUser'));
               return;
             }
-            const command = await onConfigureSsh(sshPeer.publicKey, user);
-            if (!command) return;
-            if (await copyToClipboard(command)) {
+            let commands = sshCommands;
+            if (commands === null) {
+              commands = await onConfigureSsh(sshPeer.publicKey, user);
+              if (!commands) return;
+              setSshCommands(commands);
+            }
+            if (await copyToClipboard(commands[sshPlatform])) {
               setSshCopied(true);
             } else {
               setSshError(t('service.sshCopyFailed'));
             }
           }}
         >
-          {t('service.sshGenerate')}
+          {sshCommands === null ? t('service.sshGenerate') : t('service.sshCopy')}
         </Button>
       </Modal>
     </>

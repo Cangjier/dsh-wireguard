@@ -316,6 +316,7 @@ test('configures SSH access for a joined peer and removes its private key with t
     const configured = await service.configurePeerSsh({ publicKey: client.publicKey, user: 'ubuntu' });
     assert.match(configured.command, /ssh-ed25519 /);
     assert.match(configured.command, /'ubuntu'/);
+    assert.match(configured.commands.windows, /^powershell /);
     assert.doesNotMatch(configured.command, /PRIVATE KEY/);
     const peer = configured.state.server.peers.find((candidate) => candidate.publicKey === client.publicKey);
     assert.equal(peer.sshConfigured, true);

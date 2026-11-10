@@ -1523,6 +1523,32 @@ function buildSshAuthorizeCommand(user, publicKey) {
   }
   return `u='${user}'; h=$(awk -F: -v u="$u" '$1==u{print $6; exit}' /etc/passwd); [ -n "$h" ] || { echo "No such user: $u" >&2; exit 1; }; S=""; [ "$(id -u)" -ne 0 ] && S="sudo"; $S sh -c 'mkdir -p "$1/.ssh" && chmod 700 "$1/.ssh" && touch "$1/.ssh/authorized_keys" && { grep -qxF "$2" "$1/.ssh/authorized_keys" || printf "%s\\n" "$2" >> "$1/.ssh/authorized_keys"; } && chown -R "$3" "$1/.ssh" && chmod 600 "$1/.ssh/authorized_keys"' sh "$h" '${key}' '${user}' && echo "SSH key installed for $u"`;
 }
+function buildWindowsSshAuthorizeCommand(user, publicKey) {
+  const parts = publicKey.trim().split(/\s+/);
+  const key = parts.slice(0, 2).join(" ");
+  if (!/^ssh-ed25519 [A-Za-z0-9+/=]+$/.test(key)) {
+    throw new Error("Unexpected SSH public key format.");
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(user)) {
+    throw new Error("Unexpected Windows username.");
+  }
+  const quote = (value) => value.replace(/'/g, "''");
+  const script = `$ErrorActionPreference = 'Stop'
+$key = '${quote(key)}'
+$user = '${quote(user)}'
+$admin = Join-Path $env:ProgramData 'ssh\\administrators_authorized_keys'
+$userFile = Join-Path (Join-Path 'C:\\Users' $user) '.ssh\\authorized_keys'
+foreach ($path in @($admin, $userFile)) {
+  New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
+  if (-not (Test-Path $path)) { New-Item -ItemType File -Path $path | Out-Null }
+  $lines = @(Get-Content $path -ErrorAction SilentlyContinue)
+  if ($lines -notcontains $key) { Add-Content -Path $path -Value $key -Encoding ascii }
+}
+icacls $admin /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+Write-Output 'SSH public key installed for Windows user ' + $user`;
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+}
 
 // src/lib/store.ts
 import { chmod, mkdir as mkdir2, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -2885,7 +2911,11 @@ var WireGuardService = class {
       peer.sshUser = user;
       await this.#persist();
       this.#log(`configured SSH access for ${peer.name} as ${user}`);
-      return { state: this.snapshot(), command: buildSshAuthorizeCommand(user, publicSshKey) };
+      const commands = {
+        linux: buildSshAuthorizeCommand(user, publicSshKey),
+        windows: buildWindowsSshAuthorizeCommand(user, publicSshKey)
+      };
+      return { state: this.snapshot(), command: commands.linux, commands, publicKey: publicSshKey };
     });
   }
   /**

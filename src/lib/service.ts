@@ -15,7 +15,7 @@ import { installWireGuard as installPlatformWireGuard } from './installer';
 import { allocatePeerIp, ipv4ToString, isUsableHost, parseCidr, parseIpv4 } from './ip';
 import { keyFingerprint, normalizeKey } from './keys';
 import { detectGlobalIpv6, detectLanAddress, detectPlatform, localHostname, type PlatformInfo } from './platform';
-import { buildSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
+import { buildSshAuthorizeCommand, buildWindowsSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
 import { emptyState, Store, type PluginState } from './store';
 import { Tunnel } from './tunnel';
 
@@ -888,7 +888,11 @@ export class WireGuardService {
       peer.sshUser = user;
       await this.#persist();
       this.#log(`configured SSH access for ${peer.name} as ${user}`);
-      return { state: this.snapshot(), command: buildSshAuthorizeCommand(user, publicSshKey) };
+      const commands = {
+        linux: buildSshAuthorizeCommand(user, publicSshKey),
+        windows: buildWindowsSshAuthorizeCommand(user, publicSshKey),
+      };
+      return { state: this.snapshot(), command: commands.linux, commands, publicKey: publicSshKey };
     });
   }
 
