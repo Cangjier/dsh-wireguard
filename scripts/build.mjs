@@ -47,7 +47,7 @@ async function buildClient() {
   if (!code) throw new Error('Client build produced no output');
   const wrapped = `window.__ModuleLoader__.load({\n  id: '@local/dsh-wireguard',\n  factory(require) {\n    var module = { exports: {} };\n    var exports = module.exports;\n${code
     .split('\n')
-    .map((line) => `    ${line}`)
+    .map((line) => (line.length > 0 ? `    ${line}` : line))
     .join('\n')}\n    return module.exports;\n  },\n});\n`;
   await writeFile(path.join(root, 'client.js'), wrapped, 'utf8');
 }

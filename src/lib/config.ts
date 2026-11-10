@@ -1,5 +1,6 @@
 /** Settings validation and deterministic WireGuard configuration rendering. */
 
+import { isIP } from 'node:net';
 import { DEFAULT_CONTROL_PORT, DEFAULT_INTERFACE, DEFAULT_LISTEN_PORT, DEFAULT_MTU, DEFAULT_SERVER_IP, DEFAULT_VPN_CIDR } from './constants';
 import { WireGuardError } from './errors';
 import { defaultServerIp, isUsableHost, parseCidr, parseIpv4 } from './ip';
@@ -38,7 +39,7 @@ const JOIN_CODE = /^[A-Za-z0-9_-]{0,64}$/;
  * @param {string} message explanation.
  * @returns {never}
  */
-function invalid(field, message) {
+function invalid(field, message): never {
   throw new WireGuardError('invalid_input', message, {
     status: 400,
     details: { field },
@@ -62,29 +63,53 @@ function integerInRange(value, field, min, max) {
 }
 
 /**
- * Normalize a hostname or IPv4 address (an optional port is discarded).
+ * Format a normalized host for a URL or WireGuard endpoint. IPv6 literals need
+ * square brackets before a port.
+ * @param {string} host IPv4, IPv6, or hostname.
+ * @returns {string} bracketed IPv6 or unchanged host.
+ */
+export function formatEndpointHost(host) {
+  return isIP(host) === 6 ? `[${host}]` : host;
+}
+
+/**
+ * Normalize an IPv4, IPv6, or hostname endpoint (an optional port is discarded).
+ * Bare IPv6 addresses are accepted; when a port is present, IPv6 must use
+ * brackets: `[2408:...]:51821`.
  * @param {unknown} value raw host.
- * @returns {string} normalized host, or an empty string.
+ * @returns {string} normalized host without brackets, or an empty string.
  */
 export function normalizeEndpointHost(value) {
   let text = String(value ?? '').trim();
   if (!text) return '';
   text = text.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
   text = text.split('/')[0].split('?')[0].split('#')[0];
+  if (text.startsWith('[')) {
+    const match = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(text);
+    if (!match || isIP(match[1]) !== 6) {
+      invalid('endpointHost', 'Server address must be an IPv4 address, an IPv6 address, or a hostname.');
+    }
+    if (match[1] === '::') invalid('endpointHost', 'Server address must be a connectable IPv6 address.');
+    return match[1];
+  }
+  if (isIP(text) === 6) {
+    if (text === '::') invalid('endpointHost', 'Server address must be a connectable IPv6 address.');
+    return text;
+  }
   const match = /^([^:]+)(?::\d{1,5})?$/.exec(text);
-  if (!match) invalid('endpointHost', 'Server address must be an IPv4 address or a hostname.');
+  if (!match) invalid('endpointHost', 'Bracket IPv6 addresses when adding a port, for example [2408:...]:51821.');
   const host = match[1].trim();
   const address = parseIpv4(host);
   if (address !== null) {
     if (address === 0 || address === 0xffffffff || (address >= 0xe0000000 && address <= 0xefffffff)) {
-      invalid('endpointHost', 'Server address must be a unicast IPv4 address or a hostname.');
+      invalid('endpointHost', 'Server address must be a unicast IPv4 address, an IPv6 address, or a hostname.');
     }
     return host;
   }
   if (host.length > 253) invalid('endpointHost', 'Server address is too long.');
   const labels = host.split('.');
   if (labels.some((label) => !HOST_LABEL.test(label))) {
-    invalid('endpointHost', 'Server address must be an IPv4 address or a valid hostname.');
+    invalid('endpointHost', 'Server address must be an IPv4 address, an IPv6 address, or a valid hostname.');
   }
   return host;
 }
@@ -223,7 +248,10 @@ export function buildClientConfig(input) {
 export function parseServerAddress(value, defaultPort = DEFAULT_CONTROL_PORT) {
   let text = String(value ?? '').trim();
   if (!text) invalid('serverAddress', 'Enter the server address.');
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) text = `http://${text}`;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+    if (isIP(text) === 6) text = `http://[${text}]`;
+    else text = `http://${text}`;
+  }
   let url;
   try {
     url = new URL(text);
@@ -241,6 +269,6 @@ export function parseServerAddress(value, defaultPort = DEFAULT_CONTROL_PORT) {
   if (!host) invalid('serverAddress', 'Server address is missing a host.');
   if (host === '0.0.0.0' || host === '::') invalid('serverAddress', '0.0.0.0 is not a connectable server address.');
   const port = url.port ? integerInRange(url.port, 'serverAddress', 1, 65535) : defaultPort;
-  const controlUrl = `${url.protocol}//${host}:${port}`;
-  return { host, port, controlUrl, display: `${host}:${port}` };
+  const controlUrl = `${url.protocol}//${formatEndpointHost(host)}:${port}`;
+  return { host, port, controlUrl, display: `${formatEndpointHost(host)}:${port}` };
 }

@@ -24,6 +24,8 @@ export interface Peer {
   receivedBytes: number;
   sentBytes: number;
   applied: boolean;
+  sshConfigured: boolean;
+  sshUser: string | null;
 }
 
 export interface ServerState {
@@ -80,6 +82,17 @@ export interface ToolsState {
   installHint?: string;
 }
 
+export interface DeploymentTarget {
+  available: boolean;
+  controlUrl: string | null;
+  endpoint: string | null;
+}
+
+export interface DeploymentTargets {
+  ipv4: DeploymentTarget;
+  ipv6: DeploymentTarget;
+}
+
 export interface Snapshot {
   ok: boolean;
   version: string;
@@ -89,6 +102,7 @@ export interface Snapshot {
   platform: { id: string; label: string };
   tools: ToolsState;
   settings: Settings;
+  deployment: DeploymentTargets;
   server: ServerState;
   client: ClientState;
   lastError: string | null;
@@ -114,7 +128,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function request<T = Snapshot>(path: string, body?: unknown): Promise<T> {
+export async function requestPayload<T = any>(path: string, body?: unknown): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${API_PREFIX}${path}`, {
@@ -145,7 +159,12 @@ export async function request<T = Snapshot>(path: string, body?: unknown): Promi
   if (!response.ok || !data || data.ok !== true) {
     throw new ApiError(data?.error ?? null, response.status, undefined, data?.state);
   }
-  return data.state as T;
+  return data as T;
+}
+
+export async function request<T = Snapshot>(path: string, body?: unknown): Promise<T> {
+  const data = await requestPayload<{ state: T }>(path, body);
+  return data.state;
 }
 
 export const api = {
@@ -153,9 +172,12 @@ export const api = {
   refresh: () => request('/refresh', {}),
   install: () => request('/install', {}),
   startServer: (settings: Partial<Settings>) => request('/server/start', settings),
-  stopServer: () => request('/server/stop'),
+  // The Host API only accepts GET for reads; every mutation is a POST, so the
+  // body must be an object even for actions that carry no arguments.
+  stopServer: () => request('/server/stop', {}),
   removePeer: (publicKey: string) => request('/peers/remove', { publicKey }),
+  configureSsh: (publicKey: string, user: string) => requestPayload<{ state: Snapshot; command: string }>('/peers/ssh', { publicKey, user }),
   connectClient: (values: { serverAddress: string; joinCode: string; name?: string }) => request('/client/connect', values),
-  retryClient: () => request('/client/retry'),
-  disconnectClient: () => request('/client/disconnect'),
+  retryClient: () => request('/client/retry', {}),
+  disconnectClient: () => request('/client/disconnect', {}),
 };

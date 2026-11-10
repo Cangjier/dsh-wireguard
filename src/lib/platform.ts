@@ -278,6 +278,25 @@ export function detectLanAddress(): { address: string; interfaceName: string } |
 }
 
 /**
+ * Pick a global IPv6 address for IPv6 deployment targets.
+ * @returns {string | null} global IPv6 address without a zone.
+ */
+export function detectGlobalIpv6(): string | null {
+  const candidates: string[] = [];
+  for (const [name, addresses] of Object.entries(networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      const family = address.family === 'IPv6' || (address.family as unknown) === 6;
+      if (!family || address.internal) continue;
+      const host = address.address.split('%')[0];
+      if (host === '::1' || /^fe80:/i.test(host) || /^f[cd][0-9a-f]{2}:/i.test(host)) continue;
+      if (/(docker|br-|veth|tun|tap|VirtualBox|VMware|Hyper-V)/i.test(name)) continue;
+      candidates.push(host);
+    }
+  }
+  return candidates.find((host) => host.length > 0) ?? null;
+}
+
+/**
  * This machine's display name, safe for a peer record.
  * @returns {string} hostname or `this-device`.
  */

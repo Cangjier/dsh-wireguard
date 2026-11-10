@@ -87,6 +87,7 @@ export function registerHttpApi(ctx, service) {
         else if (path === `${API_PREFIX}/server/start`) result = await service.startServer(body);
         else if (path === `${API_PREFIX}/server/stop`) result = await service.stopServer();
         else if (path === `${API_PREFIX}/peers/remove`) result = await service.removePeer(String(body.publicKey ?? ''));
+        else if (path === `${API_PREFIX}/peers/ssh`) result = await service.configurePeerSsh(body);
         else if (path === `${API_PREFIX}/client/connect`) result = await service.connectClient(body);
         else if (path === `${API_PREFIX}/client/retry`) result = await service.retryClient();
         else if (path === `${API_PREFIX}/client/disconnect`) result = await service.disconnectClient();
@@ -95,7 +96,11 @@ export function registerHttpApi(ctx, service) {
           writeJson(response, 404, { ok: false, error: { code: 'not_found', message: 'Unknown WireGuard endpoint.' } });
           return;
         }
-        writeJson(response, 200, { ok: true, state: result });
+        if (result && typeof result === 'object' && Object.prototype.hasOwnProperty.call(result, 'state')) {
+          writeJson(response, 200, { ok: true, ...result });
+        } else {
+          writeJson(response, 200, { ok: true, state: result });
+        }
       } catch (error) {
         const state = service.snapshot();
         if (error instanceof WireGuardError) {

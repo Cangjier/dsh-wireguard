@@ -13,9 +13,11 @@ import {
   Form,
   Input,
   InputNumber,
+  Modal,
   Popconfirm,
   Result,
   Row,
+  Segmented,
   Space,
   Spin,
   Table,
@@ -33,6 +35,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   GlobalOutlined,
+  KeyOutlined,
   LaptopOutlined,
   LinkOutlined,
   ReloadOutlined,
@@ -52,10 +55,38 @@ import {
   type Settings,
   type Snapshot,
 } from './api';
+import { buildLinuxClientCommand, buildLinuxClientSimpleCommand, LINUX_CLIENT_RESTART_COMMAND } from './deploy';
 import { dictionary, EN, interpolate, type MessageKey } from './i18n';
 
 const NS = 'dsh-wireguard';
 const PANEL_ID = 'wireguard';
+const SSH_USER_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/;
+
+/**
+ * Copy text with the async Clipboard API, falling back to a hidden textarea on
+ * plain-HTTP origins where navigator.clipboard is unavailable.
+ * @param {string} text text to copy.
+ * @returns {Promise<boolean>} whether the copy succeeded.
+ */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand('copy');
+    area.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
 
 type T = (key: string, params?: Record<string, string | number>) => string;
 type TabKey = 'service' | 'client';
@@ -121,11 +152,9 @@ function useController(ctx: any) {
   }, []);
 
   useEffect(() => {
+    // Load once on mount. Live counters are only updated when the user asks
+    // for a refresh, so opening the panel does not poll the Host forever.
     void refresh(false);
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void refresh(false);
-    }, 3000);
-    return () => window.clearInterval(timer);
   }, [refresh]);
 
   const action = useCallback(async (key: string, operation: () => Promise<Snapshot>) => {
@@ -137,6 +166,26 @@ function useController(ctx: any) {
         setError(null);
       }
       return next;
+    } catch (failure) {
+      if (alive.current) {
+        setError(failure instanceof ApiError ? failure : new ApiError({ code: 'unknown', message: String(failure) }, 0));
+        if (failure instanceof ApiError && failure.state) setState(failure.state);
+      }
+      return undefined;
+    } finally {
+      if (alive.current) setBusy('');
+    }
+  }, []);
+
+  const configureSsh = useCallback(async (publicKey: string, user: string) => {
+    setBusy('ssh');
+    try {
+      const result = await api.configureSsh(publicKey, user);
+      if (alive.current) {
+        setState(result.state);
+        setError(null);
+      }
+      return result.command;
     } catch (failure) {
       if (alive.current) {
         setError(failure instanceof ApiError ? failure : new ApiError({ code: 'unknown', message: String(failure) }, 0));
@@ -161,10 +210,11 @@ function useController(ctx: any) {
     startServer: (settings: Settings) => action('start', () => api.startServer(settings)),
     stopServer: () => action('stop', api.stopServer),
     removePeer: (publicKey: string) => action('remove', () => api.removePeer(publicKey)),
+    configureSsh,
     connectClient: (values: { serverAddress: string; joinCode: string; name?: string }) => action('connect', () => api.connectClient(values)),
     retryClient: () => action('retry', api.retryClient),
     disconnectClient: () => action('disconnect', api.disconnectClient),
-  }), [state, loading, refreshing, error, busy, refresh, action]);
+  }), [state, loading, refreshing, error, busy, refresh, action, configureSsh]);
 }
 
 function statusOf(state: Snapshot): { color: string; textKey: MessageKey } {
@@ -397,7 +447,7 @@ function ServiceForm({
           </Col>
           <Col span={24}>
             <Form.Item name="joinCode" label={t('service.joinCode')} extra={t('service.joinCodeHelp')}>
-              <Input className="dsh-wg-mono" placeholder="home-vpn" />
+              <Input className="dsh-wg-mono" placeholder={t('service.joinCodePlaceholder')} />
             </Form.Item>
           </Col>
         </Row>
@@ -462,6 +512,106 @@ function ServiceForm({
   );
 }
 
+function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
+  const deployment = state.deployment ?? {
+    ipv4: {
+      available: Boolean(state.server.controlUrl),
+      controlUrl: state.server.controlUrl,
+      endpoint: state.server.endpoint,
+    },
+    ipv6: { available: false, controlUrl: null, endpoint: null },
+  };
+  const [family, setFamily] = useState<'ipv4' | 'ipv6'>(() => deployment.ipv4.available ? 'ipv4' : 'ipv6');
+  const target = deployment[family];
+  useEffect(() => {
+    if (target.available) return;
+    if (deployment.ipv4.available) setFamily('ipv4');
+    else if (deployment.ipv6.available) setFamily('ipv6');
+  }, [target.available, deployment.ipv4.available, deployment.ipv6.available]);
+  const simple = useMemo(() => buildLinuxClientSimpleCommand(state, target), [state, target]);
+  const full = useMemo(() => buildLinuxClientCommand(state, target), [state, target]);
+  const [copied, setCopied] = useState<'simple' | 'full' | ''>('');
+  const copy = async (text: string, kind: 'simple' | 'full') => {
+    if (await copyToClipboard(text)) {
+      setCopied(kind);
+      window.setTimeout(() => setCopied(''), 1600);
+    }
+  };
+  return (
+    <Card
+      className="dsh-wg-card"
+      title={<Space><LaptopOutlined /><span>{t('service.deployTitle')}</span></Space>}
+      extra={<Tag>Linux</Tag>}
+    >
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+        {t('service.deploySubtitle')}
+      </Typography.Paragraph>
+      <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployWarning')} />
+      <Space direction="vertical" size={4} style={{ marginBottom: 14 }}>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t('service.deployFamilyHelp')}</Typography.Text>
+        <Segmented
+          size="small"
+          value={family}
+          onChange={(value) => setFamily(value as 'ipv4' | 'ipv6')}
+          options={[
+            { label: 'IPv4', value: 'ipv4', disabled: !deployment.ipv4.available },
+            { label: 'IPv6', value: 'ipv6', disabled: !deployment.ipv6.available },
+          ]}
+        />
+        <Typography.Text type="secondary" className="dsh-wg-mono" style={{ fontSize: 11 }}>
+          {target.controlUrl || t('service.deployUnavailable')}
+        </Typography.Text>
+      </Space>
+      {!target.available ? (
+        <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployUnavailable')} />
+      ) : null}
+      <Flex vertical gap={14}>
+        <div>
+          <Typography.Text strong>{t('service.deploySimpleTitle')}</Typography.Text>
+          <Typography.Paragraph type="secondary" style={{ margin: '4px 0 8px' }}>
+            {t('service.deploySimpleHelp')}
+          </Typography.Paragraph>
+          <Button icon={<CopyOutlined />} disabled={!target.available} onClick={() => void copy(simple, 'simple')}>
+            {copied === 'simple' ? t('service.deployCopied') : t('service.deployCopySimple')}
+          </Button>
+        </div>
+        <div>
+          <Typography.Text strong>{t('service.deployFullTitle')}</Typography.Text>
+          <Typography.Paragraph type="secondary" style={{ margin: '4px 0 8px' }}>
+            {t('service.deployFullHelp')}
+          </Typography.Paragraph>
+          <Button type="primary" icon={<CopyOutlined />} disabled={!target.available} onClick={() => void copy(full, 'full')}>
+            {copied === 'full' ? t('service.deployCopied') : t('service.deployCopyFull')}
+          </Button>
+        </div>
+      </Flex>
+      <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12 }}>
+        {t('service.deployRun')}
+      </Typography.Text>
+    </Card>
+  );
+}
+
+function CopyRestartCommand({ t }: { t: T }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (await copyToClipboard(LINUX_CLIENT_RESTART_COMMAND)) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    }
+  };
+  return (
+    <Button
+      size="small"
+      icon={<ReloadOutlined />}
+      title={t('service.restartHelp')}
+      onClick={() => void copy()}
+    >
+      {copied ? t('service.restartCopied') : t('service.restartCopy')}
+    </Button>
+  );
+}
+
 function RunningService({
   state,
   t,
@@ -469,6 +619,7 @@ function RunningService({
   onStop,
   onRemove,
   onOpenControl,
+  onConfigureSsh,
 }: {
   state: Snapshot;
   t: T;
@@ -476,9 +627,14 @@ function RunningService({
   onStop: () => void;
   onRemove: (publicKey: string) => void;
   onOpenControl: () => void;
+  onConfigureSsh: (publicKey: string, user: string) => Promise<string | undefined>;
 }) {
   const server: ServerState = state.server;
   const controlUrl = server.controlUrl || '';
+  const [sshPeer, setSshPeer] = useState<Peer | null>(null);
+  const [sshUser, setSshUser] = useState('root');
+  const [sshError, setSshError] = useState('');
+  const [sshCopied, setSshCopied] = useState(false);
   const columns: ColumnsType<Peer> = [
     {
       title: t('service.peerName'),
@@ -511,27 +667,47 @@ function RunningService({
       title: t('service.peerHandshake'),
       dataIndex: 'lastHandshakeAt',
       key: 'lastHandshakeAt',
-      render: (value) => <Typography.Text type="secondary">{formatTime(value)}</Typography.Text>,
+      render: (value) => value
+        ? <Typography.Text type="secondary">{formatTime(value)}</Typography.Text>
+        : <Typography.Text type="warning">{t('service.neverHandshake')}</Typography.Text>,
     },
     {
       title: t('service.peerActions'),
       key: 'actions',
       align: 'right',
       render: (_value, peer) => (
-        <Popconfirm
-          title={t('service.removeConfirm')}
-          okText={t('service.remove')}
-          cancelText={t('page.cancel')}
-          onConfirm={() => onRemove(peer.publicKey)}
-        >
-          <Button type="text" danger icon={<DeleteOutlined />} loading={busy === 'remove'} />
-        </Popconfirm>
+        <Space size={2}>
+          <Button
+            type="text"
+            size="small"
+            icon={<KeyOutlined />}
+            title={peer.sshConfigured ? t('service.sshConfigured', { user: peer.sshUser || '' }) : t('service.sshAction')}
+            style={peer.sshConfigured ? { color: '#52c41a' } : undefined}
+            onClick={() => {
+              setSshPeer(peer);
+              setSshUser(peer.sshUser || 'root');
+              setSshError('');
+              setSshCopied(false);
+            }}
+          >
+            SSH
+          </Button>
+          <Popconfirm
+            title={t('service.removeConfirm')}
+            okText={t('service.remove')}
+            cancelText={t('page.cancel')}
+            onConfirm={() => onRemove(peer.publicKey)}
+          >
+            <Button type="text" danger icon={<DeleteOutlined />} loading={busy === 'remove'} />
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <>
+      <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card
         className="dsh-wg-card"
         title={(
@@ -604,10 +780,26 @@ function RunningService({
         ) : null}
       </Card>
 
+      <ClientDeployScript state={state} t={t} />
+
+      {server.peers.some((peer) => peer.applied && !peer.lastHandshakeAt) ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('service.handshakeWarning')}
+          description={t('service.handshakeWarningHelp', { port: server.listenPort })}
+        />
+      ) : null}
+
       <Card
         className="dsh-wg-card"
         title={t('service.peers')}
-        extra={<Typography.Text type="secondary">{t('service.peerCount', { count: server.peers.length })}</Typography.Text>}
+        extra={(
+          <Space size={8} wrap>
+            <Typography.Text type="secondary">{t('service.peerCount', { count: server.peers.length })}</Typography.Text>
+            <CopyRestartCommand t={t} />
+          </Space>
+        )}
       >
         <Table<Peer>
           rowKey="publicKey"
@@ -621,7 +813,55 @@ function RunningService({
           }}
         />
       </Card>
-    </Space>
+      </Space>
+      <Modal
+        open={sshPeer !== null}
+        title={t('service.sshTitle')}
+        onCancel={() => setSshPeer(null)}
+        footer={null}
+        destroyOnHidden
+      >
+        <Typography.Paragraph type="secondary">{t('service.sshHelp')}</Typography.Paragraph>
+        <Typography.Text strong>{t('service.sshUser')}</Typography.Text>
+        <Input
+          value={sshUser}
+          onChange={(event) => {
+            setSshUser(event.target.value);
+            setSshError('');
+            setSshCopied(false);
+          }}
+          placeholder="root"
+          style={{ marginTop: 6 }}
+        />
+        {sshError ? <Alert type="error" showIcon style={{ marginTop: 12 }} message={sshError} /> : null}
+        <Alert type="info" showIcon style={{ marginTop: 12 }} message={t('service.sshPrivateNote')} />
+        {sshCopied ? <Alert type="success" showIcon style={{ marginTop: 12 }} message={t('service.sshCopied')} /> : null}
+        <Button
+          type="primary"
+          block
+          style={{ marginTop: 14 }}
+          loading={busy === 'ssh'}
+          disabled={!SSH_USER_RE.test(sshUser.trim())}
+          onClick={async () => {
+            if (!sshPeer) return;
+            const user = sshUser.trim();
+            if (!SSH_USER_RE.test(user)) {
+              setSshError(t('service.sshInvalidUser'));
+              return;
+            }
+            const command = await onConfigureSsh(sshPeer.publicKey, user);
+            if (!command) return;
+            if (await copyToClipboard(command)) {
+              setSshCopied(true);
+            } else {
+              setSshError(t('service.sshCopyFailed'));
+            }
+          }}
+        >
+          {t('service.sshGenerate')}
+        </Button>
+      </Modal>
+    </>
   );
 }
 
@@ -847,6 +1087,7 @@ function Page({ ctx, t: providedT }: { ctx: any; t?: (key: string) => string }) 
         onStop={() => void controller.stopServer()}
         onRemove={(publicKey) => void controller.removePeer(publicKey)}
         onOpenControl={openControl}
+        onConfigureSsh={controller.configureSsh}
       />
     ) : (
       <ServiceForm

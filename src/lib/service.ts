@@ -1,15 +1,25 @@
 /** WireGuard server/client orchestration shared by the panel and control API. */
 
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { generateJoinCode, secretsMatch } from './access';
 import { DEFAULT_CONTROL_PORT, MAX_PEERS, PLUGIN_VERSION, SERVICE_NAME } from './constants';
-import { buildClientConfig, buildServerConfig, normalizeDeviceName, normalizeEndpointHost, normalizeSettings, parseServerAddress } from './config';
+import { buildClientConfig, buildServerConfig, formatEndpointHost, normalizeDeviceName, normalizeEndpointHost, normalizeSettings, parseServerAddress } from './config';
 import { ControlPanel } from './control-panel';
 import { WireGuardError, missingToolHint } from './errors';
 import { installWireGuard as installPlatformWireGuard } from './installer';
 import { allocatePeerIp, ipv4ToString, isUsableHost, parseCidr, parseIpv4 } from './ip';
 import { keyFingerprint, normalizeKey } from './keys';
-import { detectLanAddress, detectPlatform, localHostname, type PlatformInfo } from './platform';
+import { detectGlobalIpv6, detectLanAddress, detectPlatform, localHostname, type PlatformInfo } from './platform';
+import { buildSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
 import { emptyState, Store, type PluginState } from './store';
 import { Tunnel } from './tunnel';
+
+const execFileAsync = promisify(execFile);
 
 export interface WireGuardServiceOptions {
   config?: Record<string, unknown>;
@@ -73,6 +83,10 @@ export class WireGuardService {
       this.#recordError(error);
       this.state.settings = { ...this.state.settings, ...emptyState().settings };
     }
+    if (!this.state.settings.joinCode) {
+      this.state.settings.joinCode = generateJoinCode();
+      this.#log('generated a random join code for the control panel');
+    }
     try {
       await this.#detect(true);
     } catch (error) {
@@ -111,7 +125,7 @@ export class WireGuardService {
   }
 
   /**
-   * Re-detect tools and privilege, with a short cache for polling clients.
+   * Re-detect tools and privilege, with a short cache for repeated panel reads.
    * @param {boolean} force
    * @returns {Promise<void>}
    */
@@ -203,11 +217,12 @@ export class WireGuardService {
     const panel = new ControlPanel({
       getServerInfo: () => this.#controlInfo(),
       getPeers: () => this.#publicPeers(),
+      getAccessCode: () => this.state.settings.joinCode,
       onJoin: (body, remoteAddress) => this.joinPeer(body, remoteAddress),
       onLeave: (body, remoteAddress) => this.leavePeer(body, remoteAddress),
       log: (line) => this.#log(line),
     });
-    await panel.start(this.state.server.controlPort, '0.0.0.0');
+    await panel.start(this.state.server.controlPort, '::');
     this.control = panel;
   }
 
@@ -253,6 +268,30 @@ export class WireGuardService {
     }
   }
 
+  /**
+   * Advertised deployment targets for IPv4 and IPv6 clients. The VPN itself
+   * remains IPv4; these are only the outer control/endpoint addresses.
+   * @returns {{ ipv4: Record<string, unknown>, ipv6: Record<string, unknown> }} targets.
+   */
+  #deploymentTargets() {
+    const controlPort = this.state.server.controlPort || this.state.settings.controlPort;
+    const listenPort = this.state.server.listenPort || this.state.settings.listenPort;
+    const configured = String(this.state.server.endpointHost ?? '').trim();
+    const family = isIP(configured);
+    const ipv4Host = configured && family !== 6 ? configured : '';
+    const detectedIpv6 = detectGlobalIpv6();
+    const ipv6Host = family === 6 ? configured : (detectedIpv6 || (family === 0 && configured ? configured : ''));
+    const target = (host) => {
+      if (!host) return { available: false, controlUrl: null, endpoint: null };
+      return {
+        available: true,
+        controlUrl: `http://${formatEndpointHost(host)}:${controlPort}`,
+        endpoint: `${formatEndpointHost(host)}:${listenPort}`,
+      };
+    };
+    return { ipv4: target(ipv4Host), ipv6: target(ipv6Host) };
+  }
+
   /** @returns {Record<string, unknown>} values the control panel may expose. */
   #controlInfo() {
     return {
@@ -260,6 +299,7 @@ export class WireGuardService {
       hostname: localHostname(),
       endpointHost: this.state.server.endpointHost,
       endpoint: this.state.server.endpoint,
+      controlUrl: this.state.server.controlUrl,
       controlPort: this.state.server.controlPort,
       listenPort: this.state.server.listenPort,
       publicKey: this.state.server.publicKey,
@@ -306,6 +346,7 @@ export class WireGuardService {
         name: normalizeDeviceName(raw.name, 'client'),
         createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
         applied: raw.applied !== false,
+        sshUser: typeof raw.sshUser === 'string' && SSH_USER_PATTERN.test(raw.sshUser) ? raw.sshUser : null,
       });
     }
     return peers;
@@ -382,6 +423,10 @@ export class WireGuardService {
         throw new WireGuardError('client_active', 'Disconnect the client tunnel before starting server mode.', { status: 409 });
       }
       const { settings, cidr } = normalizeSettings(input, this.state.settings);
+      if (!settings.joinCode) {
+        settings.joinCode = generateJoinCode();
+        this.#log('generated a new random join code for the control panel');
+      }
       await this.#detect(false);
       this.#requireServerTools();
       const detected = detectLanAddress();
@@ -411,9 +456,9 @@ export class WireGuardService {
         running: false,
         startedAt: null,
         publicKey: key.publicKey,
-        endpoint: `${normalizedHost}:${settings.listenPort}`,
+        endpoint: `${formatEndpointHost(normalizedHost)}:${settings.listenPort}`,
         endpointHost: normalizedHost,
-        controlUrl: `http://${normalizedHost}:${settings.controlPort}`,
+        controlUrl: `http://${formatEndpointHost(normalizedHost)}:${settings.controlPort}`,
         controlPort: settings.controlPort,
         listenPort: settings.listenPort,
         vpnCidr: cidr.normalized,
@@ -509,6 +554,7 @@ export class WireGuardService {
       const address = parseServerAddress(input.serverAddress, DEFAULT_CONTROL_PORT);
       const joinCode = String(input.joinCode ?? '').trim();
       const name = normalizeDeviceName(input.name, localHostname());
+      const family = address.host.includes(':') ? 'ipv6' : 'ipv4';
       const health = await this.#fetchJson(`${address.controlUrl}/health`);
       if (health.service !== SERVICE_NAME) {
         throw new WireGuardError('wrong_service', 'That address is not a DSH WireGuard control panel.', { status: 502 });
@@ -522,7 +568,7 @@ export class WireGuardService {
       const key = await this.store.ensureKey('client');
       const join = await this.#fetchJson(`${address.controlUrl}/join`, {
         method: 'POST',
-        body: { name, publicKey: key.publicKey, code: joinCode },
+        body: { name, publicKey: key.publicKey, code: joinCode, family },
       });
       const assignedIp = parseIpv4(join?.client?.ip);
       if (assignedIp === null || !isUsableHost(assignedIp, vpnCidr)) {
@@ -531,8 +577,8 @@ export class WireGuardService {
       const assignedAddress = ipv4ToString(assignedIp);
       const joinedServerKey = normalizeKey(join?.server?.publicKey ?? serverPublicKey);
       if (!joinedServerKey) throw new WireGuardError('bad_server', 'The server returned an invalid public key.', { status: 502 });
-      const endpoint = String(join?.server?.endpoint || `${address.host}:${listenPort}`);
-      if (!/^[^:\s]+:\d{1,5}$/.test(endpoint)) throw new WireGuardError('bad_server', 'The server returned an invalid WireGuard endpoint.', { status: 502 });
+      const endpoint = String(join?.server?.endpoint || `${formatEndpointHost(address.host)}:${listenPort}`);
+      if (!/^(?:\[[0-9A-Fa-f:.]+\]|[^:\s]+):\d{1,5}$/.test(endpoint)) throw new WireGuardError('bad_server', 'The server returned an invalid WireGuard endpoint.', { status: 502 });
       const advertisedMtu = integerOr(health.mtu, this.state.settings.mtu);
       const clientSettings = {
         ...this.state.settings,
@@ -685,12 +731,13 @@ export class WireGuardService {
       if (!this.state.server.running || !this.control) {
         throw new WireGuardError('not_running', 'The WireGuard server is not running.', { status: 503 });
       }
-      if (this.state.settings.joinCode && String(body.code ?? '') !== this.state.settings.joinCode) {
+      if (this.state.settings.joinCode && !secretsMatch(String(body.code ?? ''), this.state.settings.joinCode)) {
         throw new WireGuardError('invalid_join_code', 'The join code is missing or incorrect.', { status: 401 });
       }
       const publicKey = normalizeKey(body.publicKey);
       if (!publicKey) throw new WireGuardError('invalid_public_key', 'A valid WireGuard public key is required.', { status: 400 });
       const name = normalizeDeviceName(body.name, 'client');
+      const family = body.family === 'ipv6' ? 'ipv6' : body.family === 'ipv4' ? 'ipv4' : '';
       const cidr = parseCidr(this.state.server.vpnCidr);
       if (!cidr) throw new WireGuardError('server_not_ready', 'The server subnet is invalid.', { status: 500 });
       const existing = this.state.server.peers.find((peer) => peer.publicKey === publicKey);
@@ -701,7 +748,7 @@ export class WireGuardService {
         await this.#safeRewriteServerConfig();
         await this.#persist();
         this.#log(`peer ${name} (${existing.ip}) rejoined from ${remoteAddress || 'unknown'}`);
-        return this.#joinResult(existing);
+        return this.#joinResult(existing, family);
       }
       if (this.state.server.peers.length >= MAX_PEERS) {
         throw new WireGuardError('server_full', 'This server has reached its peer limit.', { status: 409 });
@@ -716,6 +763,7 @@ export class WireGuardService {
         applied: false,
         online: false,
         lastHandshakeAt: null,
+        sshUser: null,
       };
       this.state.server.peers.push(peer);
       try {
@@ -730,7 +778,7 @@ export class WireGuardService {
       await this.#safeRewriteServerConfig();
       await this.#persist();
       this.#log(`peer ${name} (${ip}) joined from ${remoteAddress || 'unknown'}`);
-      return this.#joinResult(peer);
+      return this.#joinResult(peer, family);
     });
   }
 
@@ -742,7 +790,7 @@ export class WireGuardService {
    */
   async leavePeer(body, remoteAddress = '') {
     return this.#serialized(async () => {
-      if (this.state.settings.joinCode && String(body.code ?? '') !== this.state.settings.joinCode) {
+      if (this.state.settings.joinCode && !secretsMatch(String(body.code ?? ''), this.state.settings.joinCode)) {
         throw new WireGuardError('invalid_join_code', 'The join code is missing or incorrect.', { status: 401 });
       }
       const publicKey = normalizeKey(body.publicKey);
@@ -775,6 +823,7 @@ export class WireGuardService {
         await this.tunnel.removePeer(this.state.server.interfaceName, key);
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== key);
+      await this.#removeSshKey(key);
       await this.#safeRewriteServerConfig();
       await this.#persist();
       return this.snapshot();
@@ -782,21 +831,152 @@ export class WireGuardService {
   }
 
   /**
+   * Configure SSH access for one joined peer. The private key is generated and
+   * kept under the plugin data directory; only the public-key install command
+   * is returned to the caller.
+   * @param {Record<string, unknown>} input peer public key and SSH username.
+   * @returns {Promise<{ state: Record<string, unknown>, command: string }>} snapshot and client command.
+   */
+  async configurePeerSsh(input) {
+    return this.#serialized(async () => {
+      const publicKey = normalizeKey(input.publicKey);
+      if (!publicKey) {
+        throw new WireGuardError('invalid_public_key', 'A valid WireGuard public key is required.', { status: 400 });
+      }
+      const peer = this.state.server.peers.find((candidate) => candidate.publicKey === publicKey);
+      if (!peer) {
+        throw new WireGuardError('peer_not_found', 'That device has not joined this server.', { status: 404 });
+      }
+      const user = String(input.user ?? '').trim();
+      if (!SSH_USER_PATTERN.test(user)) {
+        throw new WireGuardError('invalid_input', 'SSH username must start with a letter or underscore and contain only letters, digits, underscores, or dashes.', {
+          status: 400,
+          details: { field: 'sshUser' },
+        });
+      }
+      const publicSshKey = await this.#ensureSshKey(publicKey);
+      peer.sshUser = user;
+      await this.#persist();
+      this.#log(`configured SSH access for ${peer.name} as ${user}`);
+      return { state: this.snapshot(), command: buildSshAuthorizeCommand(user, publicSshKey) };
+    });
+  }
+
+  /**
+   * @param {string} peerPublicKey peer WireGuard public key.
+   * @returns {string} private-key path under the plugin data directory.
+   */
+  #sshKeyPath(peerPublicKey) {
+    const digest = createHash('sha256').update(peerPublicKey).digest('hex');
+    return path.join(this.store.dataDir, 'ssh', `${digest}.key`);
+  }
+
+  /**
+   * Reuse a peer's SSH key if present, otherwise generate a new Ed25519 key.
+   * @param {string} peerPublicKey peer WireGuard public key.
+   * @returns {Promise<string>} SSH public key.
+   */
+  async #ensureSshKey(peerPublicKey) {
+    const keyPath = this.#sshKeyPath(peerPublicKey);
+    const publicPath = `${keyPath}.pub`;
+    const directory = path.dirname(keyPath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    try {
+      await chmod(directory, 0o700);
+    } catch {
+      // Windows ignores POSIX modes.
+    }
+    try {
+      const existing = (await readFile(publicPath, 'utf8')).trim();
+      if (existing) {
+        try {
+          await chmod(keyPath, 0o600);
+        } catch {
+          // Windows ignores POSIX modes.
+        }
+        return existing;
+      }
+    } catch {
+      // Generate below.
+    }
+    try {
+      await readFile(keyPath, 'utf8');
+      try {
+        const derived = await execFileAsync('ssh-keygen', ['-y', '-f', keyPath]);
+        const publicKey = String(derived.stdout ?? '').trim();
+        if (publicKey) {
+          await writeFile(publicPath, `${publicKey}\n`, { encoding: 'utf8', mode: 0o644 });
+          try {
+            await chmod(keyPath, 0o600);
+          } catch {
+            // Windows ignores POSIX modes.
+          }
+          return publicKey;
+        }
+      } catch {
+        // Replace an unreadable private key below.
+      }
+    } catch {
+      // No private key yet.
+    }
+    await rm(keyPath, { force: true }).catch(() => {});
+    await rm(publicPath, { force: true }).catch(() => {});
+    try {
+      await execFileAsync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'dsh-wireguard', '-f', keyPath]);
+    } catch {
+      throw new WireGuardError('ssh_keygen_failed', 'Could not generate an SSH key for the client.', {
+        status: 500,
+        hint: 'Install OpenSSH ssh-keygen on the Harness host, then retry.',
+      });
+    }
+    const publicKey = (await readFile(publicPath, 'utf8')).trim();
+    if (!publicKey) {
+      throw new WireGuardError('ssh_keygen_failed', 'SSH key generation produced no public key.', { status: 500 });
+    }
+    try {
+      await chmod(keyPath, 0o600);
+    } catch {
+      // Windows ignores POSIX modes.
+    }
+    return publicKey;
+  }
+
+  /**
+   * Remove a peer's stored SSH key when the peer is removed.
+   * @param {string} peerPublicKey peer WireGuard public key.
+   * @returns {Promise<void>}
+   */
+  async #removeSshKey(peerPublicKey) {
+    const keyPath = this.#sshKeyPath(peerPublicKey);
+    await rm(keyPath, { force: true }).catch(() => {});
+    await rm(`${keyPath}.pub`, { force: true }).catch(() => {});
+  }
+
+  /**
    * Build the server data returned to a joining client.
    * @param {Record<string, any>} peer assigned peer.
    * @returns {Record<string, unknown>} join response.
    */
-  #joinResult(peer) {
+  #joinResult(peer, family = '') {
     const server = this.state.server;
     if (!server.publicKey || !server.endpoint) {
       throw new WireGuardError('server_not_ready', 'The WireGuard server is missing its key or endpoint.', { status: 500 });
     }
+    const targets = this.#deploymentTargets();
+    const selected = family === 'ipv6' ? targets.ipv6 : family === 'ipv4' ? targets.ipv4 : null;
+    if (family && !selected?.available) {
+      throw new WireGuardError('family_unavailable', `No ${family} deployment address is available.`, {
+        status: 503,
+        hint: 'Configure a reachable address for this family, or use the other deployment target.',
+      });
+    }
+    const endpoint = selected?.endpoint || server.endpoint;
     return {
       client: { ip: peer.ip, address: `${peer.ip}/32`, name: peer.name },
       server: {
         name: localHostname(),
         publicKey: server.publicKey,
-        endpoint: server.endpoint,
+        endpoint,
         endpointHost: server.endpointHost,
         vpnCidr: server.vpnCidr,
         listenPort: server.listenPort,
@@ -983,6 +1163,7 @@ export class WireGuardService {
         installHint,
       },
       settings: { ...this.state.settings },
+      deployment: this.#deploymentTargets(),
       server: {
         ...this.state.server,
         publicKeyFingerprint: keyFingerprint(this.state.server.publicKey),
@@ -1000,6 +1181,8 @@ export class WireGuardService {
           receivedBytes: integerOr(peer.receivedBytes, 0),
           sentBytes: integerOr(peer.sentBytes, 0),
           applied: peer.applied !== false,
+          sshConfigured: Boolean(peer.sshUser),
+          sshUser: peer.sshUser ?? null,
         })),
       },
       client: {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildClientConfig, buildServerConfig, normalizeSettings, parseServerAddress } from '../src/lib/config';
+import { buildClientConfig, buildServerConfig, formatEndpointHost, normalizeEndpointHost, normalizeSettings, parseServerAddress } from '../src/lib/config';
 import { parseCidr } from '../src/lib/ip';
 
 test('normalizes a complete server configuration', () => {
@@ -67,4 +67,25 @@ test('parses bare hosts, ports, and control URLs', () => {
 
 test('server address parsing uses the selected default port', () => {
   assert.equal(parseServerAddress('192.168.1.10', 6000).port, 6000);
+});
+
+test('accepts IPv6 transport endpoints while keeping the VPN subnet IPv4', () => {
+  assert.equal(normalizeEndpointHost('[2408:400a:109:bf00::1]:51821'), '2408:400a:109:bf00::1');
+  assert.equal(normalizeEndpointHost('2408:400a:109:bf00::1'), '2408:400a:109:bf00::1');
+  assert.equal(formatEndpointHost('2408:400a:109:bf00::1'), '[2408:400a:109:bf00::1]');
+
+  assert.deepEqual(parseServerAddress('[2408:400a:109:bf00::1]:51821'), {
+    host: '2408:400a:109:bf00::1',
+    port: 51821,
+    controlUrl: 'http://[2408:400a:109:bf00::1]:51821',
+    display: '[2408:400a:109:bf00::1]:51821',
+  });
+  assert.equal(parseServerAddress('2408:400a:109:bf00::1', 6000).controlUrl, 'http://[2408:400a:109:bf00::1]:6000');
+
+  const { settings } = normalizeSettings({
+    vpnCidr: '10.66.66.0/24',
+    endpointHost: '[2408:400a:109:bf00::1]:51821',
+  });
+  assert.equal(settings.endpointHost, '2408:400a:109:bf00::1');
+  assert.equal(settings.vpnCidr, '10.66.66.0/24');
 });
