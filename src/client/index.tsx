@@ -17,7 +17,7 @@ import {
   Popconfirm,
   Result,
   Row,
-  Segmented,
+  Select,
   Space,
   Spin,
   Table,
@@ -522,6 +522,7 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
     ipv6: { available: false, controlUrl: null, endpoint: null },
   };
   const [family, setFamily] = useState<'ipv4' | 'ipv6'>(() => deployment.ipv4.available ? 'ipv4' : 'ipv6');
+  const [mode, setMode] = useState<'simple' | 'full'>('full');
   const target = deployment[family];
   useEffect(() => {
     if (target.available) return;
@@ -530,11 +531,12 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
   }, [target.available, deployment.ipv4.available, deployment.ipv6.available]);
   const simple = useMemo(() => buildLinuxClientSimpleCommand(state, target), [state, target]);
   const full = useMemo(() => buildLinuxClientCommand(state, target), [state, target]);
-  const [copied, setCopied] = useState<'simple' | 'full' | ''>('');
-  const copy = async (text: string, kind: 'simple' | 'full') => {
-    if (await copyToClipboard(text)) {
-      setCopied(kind);
-      window.setTimeout(() => setCopied(''), 1600);
+  const command = mode === 'full' ? full : simple;
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (await copyToClipboard(command)) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
     }
   };
   return (
@@ -547,47 +549,37 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
         {t('service.deploySubtitle')}
       </Typography.Paragraph>
       <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployWarning')} />
-      <Space direction="vertical" size={4} style={{ marginBottom: 14 }}>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t('service.deployFamilyHelp')}</Typography.Text>
-        <Segmented
+      <Space wrap size={10} style={{ marginBottom: 12 }}>
+        <Select
           size="small"
           value={family}
+          style={{ width: 150 }}
           onChange={(value) => setFamily(value as 'ipv4' | 'ipv6')}
           options={[
-            { label: 'IPv4', value: 'ipv4', disabled: !deployment.ipv4.available },
+            { label: `IPv4 · ${t('service.deployFamily')}`, value: 'ipv4', disabled: !deployment.ipv4.available },
             { label: 'IPv6', value: 'ipv6', disabled: !deployment.ipv6.available },
           ]}
         />
-        <Typography.Text type="secondary" className="dsh-wg-mono" style={{ fontSize: 11 }}>
-          {target.controlUrl || t('service.deployUnavailable')}
-        </Typography.Text>
+        <Select
+          size="small"
+          value={mode}
+          style={{ width: 180 }}
+          onChange={(value) => setMode(value as 'simple' | 'full')}
+          options={[
+            { label: t('service.deployFullTitle'), value: 'full' },
+            { label: t('service.deploySimpleTitle'), value: 'simple' },
+          ]}
+        />
       </Space>
       {!target.available ? (
         <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t('service.deployUnavailable')} />
       ) : null}
-      <Flex vertical gap={14}>
-        <div>
-          <Typography.Text strong>{t('service.deploySimpleTitle')}</Typography.Text>
-          <Typography.Paragraph type="secondary" style={{ margin: '4px 0 8px' }}>
-            {t('service.deploySimpleHelp')}
-          </Typography.Paragraph>
-          <Button icon={<CopyOutlined />} disabled={!target.available} onClick={() => void copy(simple, 'simple')}>
-            {copied === 'simple' ? t('service.deployCopied') : t('service.deployCopySimple')}
-          </Button>
-        </div>
-        <div>
-          <Typography.Text strong>{t('service.deployFullTitle')}</Typography.Text>
-          <Typography.Paragraph type="secondary" style={{ margin: '4px 0 8px' }}>
-            {t('service.deployFullHelp')}
-          </Typography.Paragraph>
-          <Button type="primary" icon={<CopyOutlined />} disabled={!target.available} onClick={() => void copy(full, 'full')}>
-            {copied === 'full' ? t('service.deployCopied') : t('service.deployCopyFull')}
-          </Button>
-        </div>
-      </Flex>
-      <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12 }}>
-        {t('service.deployRun')}
-      </Typography.Text>
+      <Space wrap align="center" size={12}>
+        <Typography.Text style={{ fontSize: 12 }}>{t('service.deployEffect')}</Typography.Text>
+        <Button type="primary" icon={<CopyOutlined />} disabled={!target.available} onClick={() => void copy()}>
+          {copied ? t('service.deployCopied') : t('service.deployCopy')}
+        </Button>
+      </Space>
     </Card>
   );
 }
@@ -780,8 +772,6 @@ function RunningService({
         ) : null}
       </Card>
 
-      <ClientDeployScript state={state} t={t} />
-
       {server.peers.some((peer) => peer.applied && !peer.lastHandshakeAt) ? (
         <Alert
           type="warning"
@@ -813,6 +803,8 @@ function RunningService({
           }}
         />
       </Card>
+
+      <ClientDeployScript state={state} t={t} />
       </Space>
       <Modal
         open={sshPeer !== null}
@@ -835,6 +827,7 @@ function RunningService({
         />
         {sshError ? <Alert type="error" showIcon style={{ marginTop: 12 }} message={sshError} /> : null}
         <Alert type="info" showIcon style={{ marginTop: 12 }} message={t('service.sshPrivateNote')} />
+        <Alert type="warning" showIcon style={{ marginTop: 12 }} message={t('service.sshWindowsNote')} />
         {sshCopied ? <Alert type="success" showIcon style={{ marginTop: 12 }} message={t('service.sshCopied')} /> : null}
         <Button
           type="primary"
