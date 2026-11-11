@@ -12,7 +12,7 @@
 
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { createHttpApiHandler } from './lib/http-api';
+import { createControlExtraHandler } from './lib/http-api';
 import { WireGuardService } from './lib/service';
 
 const home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path.join(homedir(), '.dsh');
@@ -25,11 +25,9 @@ const service = new WireGuardService({
   log: (line) => console.log(`[wireguard-control] ${line}`),
 });
 
-const handler = createHttpApiHandler(service);
-service.setControlExtraHandler(async (request, response) => {
-  await handler(request, response);
-  return true;
-});
+// The shared listener also answers the public /join and /leave routes, so the
+// panel API only claims requests below its own prefix.
+service.setControlExtraHandler(createControlExtraHandler(service));
 await service.init();
 await service.startControlPanel();
 console.log('[wireguard-control] ready; control panel owns 51821');

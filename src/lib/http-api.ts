@@ -156,6 +156,39 @@ function createExternalControlProxy(service) {
 }
 
 /**
+ * Whether an address belongs to the loopback interface. The panel API is only
+ * for the local DSH plugin proxy; the control listener itself is public.
+ * @param {string | undefined} address socket peer address.
+ * @returns {boolean} whether the peer is local.
+ */
+function isLoopbackAddress(address) {
+  if (!address) return false;
+  const text = address.startsWith('::ffff:') ? address.slice(7) : address;
+  if (text === '::1') return true;
+  return /^127\./.test(text) && text.split('.').length === 4;
+}
+
+/**
+ * Build the extra handler the standalone control service installs on its
+ * listener. That listener also serves the public join routes, so this handler
+ * must claim only its own API prefix on loopback requests and let everything
+ * else fall through to the control panel. The prefix carries no secrets, but
+ * it includes the join code, so it must never answer the public interface.
+ * @param {import('./service').WireGuardService} service service instance.
+ * @returns {(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean>} handler that reports whether it handled the request.
+ */
+export function createControlExtraHandler(service) {
+  const api = createHttpApiHandler(service);
+  return async (request, response) => {
+    if (!isLoopbackAddress(request.socket?.remoteAddress)) return false;
+    const path = new URL(request.url ?? '/', 'http://local.invalid').pathname;
+    if (path !== API_PREFIX && !path.startsWith(`${API_PREFIX}/`)) return false;
+    await api(request, response);
+    return true;
+  };
+}
+
+/**
  * Register the panel's local HTTP API on the Harness web server.
  * @param {import('@deepseek-ai/cordis').Context} ctx Host context.
  * @param {import('./service').WireGuardService} service service instance.
