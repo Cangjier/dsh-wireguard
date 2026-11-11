@@ -1270,8 +1270,8 @@ function Page({ ctx, t: providedT }: { ctx: any; t?: (key: string) => string }) 
   );
 }
 
-export const inject = ['locale']
+export const inject: string[] = []
 
-export function apply(ctx: any) {
-  ctx.effect(() => ctx.locale.register(NS, { en: EN, zh: dictionary('zh') }), 'wireguard dictionaries')
+export function apply() {
+  // The panel UI (including its dictionaries) is hosted by dsh-person-web.
 }
