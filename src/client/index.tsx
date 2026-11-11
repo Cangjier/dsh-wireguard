@@ -1270,25 +1270,8 @@ function Page({ ctx, t: providedT }: { ctx: any; t?: (key: string) => string }) 
   );
 }
 
-function SidebarIcon({ size = 20 }: { size?: number }) {
-  return <SafetyCertificateOutlined style={{ fontSize: size }} />;
-}
-
-export const inject = ['slots', 'locale', 'theme'];
+export const inject = ['locale']
 
 export function apply(ctx: any) {
-  ctx.effect(() => ctx.locale.register(NS, { en: EN, zh: dictionary('zh') }), 'wireguard dictionaries');
-  const t = ctx.locale.bind(NS);
-  const page = (props: any) => <Page {...props} ctx={ctx} />;
-  ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main',
-    key: PANEL_ID,
-    locale: NS,
-  }, page));
-  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-    name: 'sidebar.panellist',
-    id: PANEL_ID,
-    order: 20,
-    label: () => t('panel.label'),
-  }, SidebarIcon));
+  ctx.effect(() => ctx.locale.register(NS, { en: EN, zh: dictionary('zh') }), 'wireguard dictionaries')
 }
